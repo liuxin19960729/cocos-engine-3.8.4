@@ -1,0 +1,105 @@
+name: <Web> Interface check
+
+on: [pull_request]
+
+# github.head_ref is only defined on pull_request events
+concurrency:
+  group: ${{ github.workflow }}-${{ github.actor }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+
+jobs:
+  interface_check:
+    if: 
+      (! contains(github.event.pull_request.body, '[X] does not change any runtime related code or build configuration'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+
+      - uses: actions/checkout@v4
+        name: Checkout Base Ref
+        with:
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+          ref: ${{ github.base_ref }}
+          path: './engine'
+      - run: |
+          "EXT_VERSION=$(node ./engine/.github/workflows/get-native-external-version.js)" >> $env:GITHUB_ENV
+        shell: pwsh
+      - uses: actions/checkout@v4
+        name: Download external
+        with:
+          repository: cocos/cocos-engine-external
+          path: './engine/native/external'
+          ref: "${{ env.EXT_VERSION }}"
+          fetch-depth: 1
+
+      - name: Build Base Declarations
+        working-directory: ./engine
+        run: |
+          npm install
+
+      - name: Clear npm Cache
+        run: |
+          npm cache clean --force
+
+      - uses: actions/checkout@v4
+        name: Checkout Head Ref
+        with:
+          ref: 'refs/pull/${{ github.event.pull_request.number }}/merge' # Don't check out the head commit, checkout the "merge commit" instead
+          path: './engine-HEAD'
+
+      - run: |
+          "EXT_VERSION_HEAD=$(node ./engine-HEAD/.github/workflows/get-native-external-version.js)" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - uses: actions/checkout@v4
+        name: Download external
+        with:
+          repository: cocos/cocos-engine-external
+          path: './engine-HEAD/native/external'
+          ref: "${{ env.EXT_VERSION_HEAD }}"
+          fetch-depth: 1
+
+      - name: Build Head Declarations
+        working-directory: ./engine-HEAD
+        run: |
+          npm install
+
+      - uses: LouisBrunner/diff-action@v2.0.0
+        with:
+          old: ./engine/bin/.declarations/cc.d.ts
+          new: ./engine-HEAD/bin/.declarations/cc.d.ts
+          mode: addition
+          tolerance: worse
+          output: ./engine/interface-diff.txt
+
+      - name: optimize interface check report
+        working-directory: ./engine
+        run: |
+          cat ./interface-diff.txt
+          node ./.github/workflows/interface-check-report.js
+
+      - name: Write PR number to file
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            fs.writeFileSync('interface-check-pr.txt', process.env.PR_NUMBER);
+
+      - name: Upload PR number artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: interface-check-pr.txt
+          path: |
+            interface-check-pr.txt
+
+      - name: Upload interface diff artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: interface-diff.txt
+          path: |
+            ./engine/interface-diff.txt
